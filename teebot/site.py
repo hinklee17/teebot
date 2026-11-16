@@ -108,15 +108,28 @@ MONTH_RE = re.compile(r"^(January|February|March|April|May|June|July|August|Sept
                       r"October|November|December) \d{4}$")
 
 
+def _type_date(date_input, date_text: str) -> None:
+    date_input.evaluate(
+        """(el, v) => { el.removeAttribute('readonly'); el.value = v;
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new Event('change', {bubbles: true})); }""", date_text)
+    date_input.press("Tab")
+
+
 def _pick_date(page: Page, d: date, date_text: str) -> None:
-    """Confirmed from screenshot: Date box (default = today) with a calendar button that
-    opens a month grid (header 'November 2026', ◄ ► arrows, Su..Sa). Only bookable days
-    (today + 7) are highlighted. Click the day like a person would; fall back to typing.
+    """Date box (default = today) with a calendar button.
+    Typing the date is what works on the real site (confirmed in the GitHub dry run),
+    so do that first; only fall back to clicking the calendar if the typed value doesn't stick.
+    The results header ('Showing N results for <date>') is checked afterwards either way.
     """
     date_input = page.locator(
         "xpath=//*[normalize-space(text())='Date:']/following::input[1]").first
     if date_input.input_value().strip() == date_text:
         return
+    _type_date(date_input, date_text)
+    if date_input.input_value().strip() == date_text:
+        return
+    print("  typed date didn't stick; trying the calendar")
     try:
         btn = date_input.locator(
             "xpath=following::*[self::a or self::button or self::span or self::img]"
@@ -136,13 +149,7 @@ def _pick_date(page: Page, d: date, date_text: str) -> None:
         (cells.last if d.day >= 15 else cells.first).click()  # avoid spill-over days
         page.wait_for_timeout(500)
     except Exception as e:
-        print(f"  calendar click failed ({e.__class__.__name__}); typing date instead")
-    if date_input.input_value().strip() != date_text:
-        date_input.evaluate(
-            """(el, v) => { el.removeAttribute('readonly'); el.value = v;
-                el.dispatchEvent(new Event('input', {bubbles: true}));
-                el.dispatchEvent(new Event('change', {bubbles: true})); }""", date_text)
-        date_input.press("Tab")
+        raise RuntimeError(f"Couldn't set the date to {date_text} ({e.__class__.__name__})") from e
 
 
 def open_tee_sheet(page: Page, base_url: str, d: date, start: str = "7:00 AM",
@@ -160,6 +167,10 @@ def open_tee_sheet(page: Page, base_url: str, d: date, start: str = "7:00 AM",
         else:
             page.goto(base_url, wait_until="domcontentloaded")
     date_text = f"{d:%b} {d.day}, {d.year}"  # site format: "Nov 22, 2026"
+    try:
+        page.locator("xpath=//*[normalize-space(text())='Date:']").first.wait_for(timeout=8000)
+    except Exception:
+        raise RuntimeError(f"Tee sheet search form not found (session expired?) at {page.url}")
     _pick_date(page, d, date_text)
     picked = _choose(page, "Time:", _earliest_time_at_or_before(start))
     print(f"  search {date_text} from {picked}")
@@ -167,10 +178,29 @@ def open_tee_sheet(page: Page, base_url: str, d: date, start: str = "7:00 AM",
     _choose(page, "Holes:", str(holes))
     page.get_by_role("button", name="Search").or_(page.get_by_text("Search", exact=True)).first.click()
     page.wait_for_load_state("networkidle")
-    header = page.get_by_text(re.compile(r"Showing \d+ results? for|No .*(results|tee times)", re.I)).first
-    header.wait_for(timeout=15000)
-    if date_text not in header.inner_text() and "no " not in header.inner_text().lower():
-        raise RuntimeError(f"Search didn't switch to {date_text}: got '{header.inner_text()}'")
+    _wait_for_results(page, date_text)
+
+
+def _wait_for_results(page: Page, date_text: str, timeout_s: float = 10) -> None:
+    """Wait until the results header names THIS date (not a stale header from the previous
+    search), or a 'no tee times' style message appears. If neither shows up but the date box
+    holds the right date and there are no Book buttons, treat it as zero results."""
+    import time
+    ok = page.get_by_text(re.compile(rf"Showing \d+ results? for {re.escape(date_text)}", re.I))
+    none_msg = page.get_by_text(re.compile(
+        r"\b(no|0) (results|tee ?times|times)|nothing (is )?available|no availability", re.I))
+    end = time.monotonic() + timeout_s
+    while time.monotonic() < end:
+        if ok.count() or none_msg.count():
+            return
+        page.wait_for_timeout(500)
+    date_input = page.locator("xpath=//*[normalize-space(text())='Date:']/following::input[1]").first
+    books = page.get_by_role("button", name="Book", exact=True).or_(
+        page.get_by_role("link", name="Book", exact=True))
+    if date_input.count() and date_input.input_value().strip() == date_text and books.count() == 0:
+        print(f"  no results header for {date_text}; treating as 0 open times")
+        return
+    raise RuntimeError(f"Search results for {date_text} didn't load")
 
 
 def _parse_time(text: str):
@@ -223,17 +253,28 @@ def book(page: Page, slot: Slot, players: int, d: date) -> str:
 
     page.get_by_role("button", name="Finish Booking").or_(
         page.get_by_role("link", name="Finish Booking")).first.click()
-    page.wait_for_load_state("networkidle")
-    page.wait_for_timeout(1500)
-    after_text = page.locator("body").inner_text()
-    if re.search(r"error|unable|not available|no longer|expired", after_text, re.I) \
-            and "Finish Booking" in after_text:
+
+    # From here on the booking may have gone through, so any surprise is treated as
+    # "unverified" (date gets parked + you get a please-check email) -- never retried.
+    try:
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(1500)
+        after_text = page.locator("body").inner_text()
+        refused = re.search(r"error|unable|not available|no longer|expired", after_text, re.I) \
+            and "Finish Booking" in after_text
+    except Exception as e:
+        raise BookingUnverified(f"Clicked Finish Booking for {date_text} {time_text}, then: {e}") from e
+    if refused:
+        # Still on the details page with an error message: definitely not booked.
         raise RuntimeError(f"Site refused booking: {after_text[:300]}")
 
-    # Verify on My Reservations.
-    page.get_by_role("link", name="My Reservations").first.click()
-    page.wait_for_load_state("networkidle")
-    res_text = page.locator("body").inner_text()
+    try:
+        page.get_by_role("link", name="My Reservations").first.click()
+        page.wait_for_load_state("networkidle")
+        res_text = page.locator("body").inner_text()
+    except Exception as e:
+        raise BookingUnverified(
+            f"Clicked Finish Booking for {date_text} {time_text}, but couldn't open My Reservations: {e}") from e
     if date_text in res_text and time_text in res_text:
         return f"Verified in My Reservations: {date_text} {time_text}.\n\nPage after booking:\n{after_text[:800]}"
     raise BookingUnverified(
