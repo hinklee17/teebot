@@ -1,0 +1,10 @@
+{
+  "club_url": "https://www.goibsvision.com/WebRes/Club/FederalClub/Browse",
+  "timezone": "America/New_York",
+  "days": ["Saturday", "Sunday"],
+  "window_start": "07:00",
+  "window_end": "11:00",
+  "players": 4,
+  "days_ahead": 7,
+  "prefer": "earliest"
+}
