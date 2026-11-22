@@ -29,6 +29,9 @@ fi
 id teebot >/dev/null 2>&1 || useradd --system --home "$APP" --shell /usr/sbin/nologin teebot
 
 say "Getting the latest code"
+# The folder belongs to the bot's user; tell git (run as root) that's fine.
+git config --global --get-all safe.directory 2>/dev/null | grep -qx "$APP" \
+  || git config --global --add safe.directory "$APP"
 if [ -d "$APP/.git" ]; then
   [ -f "$APP/state.json" ] && cp "$APP/state.json" /tmp/teebot-state.json
   git -C "$APP" fetch -q origin main
@@ -42,7 +45,10 @@ say "Installing Python packages and the browser (takes a couple of minutes)"
 python3 -m venv "$APP/venv"
 "$APP/venv/bin/pip" install -q --upgrade pip
 "$APP/venv/bin/pip" install -q -r "$APP/requirements.txt"
-PLAYWRIGHT_BROWSERS_PATH="$APP/browsers" "$APP/venv/bin/python" -m playwright install --with-deps chromium >/dev/null
+# Prefer IPv4: droplets often have no IPv6, which breaks the browser download.
+NODE_OPTIONS=--dns-result-order=ipv4first PLAYWRIGHT_BROWSERS_PATH="$APP/browsers" \
+  "$APP/venv/bin/python" -m playwright install --with-deps chromium >/dev/null
+compgen -G "$APP/browsers/chromium*" >/dev/null || { echo "Browser download failed; re-run this installer."; exit 1; }
 chown -R teebot:teebot "$APP"
 
 if [ ! -f "$ENV_FILE" ]; then
