@@ -97,7 +97,7 @@ def cycle(sess: Session) -> str:
     except site.BookingUnverified:
         raise
     except Exception as first:
-        log(f"  check failed ({first.__class__.__name__}); logging in again and retrying")
+        log(f"  check failed ({first.__class__.__name__}: {str(first).splitlines()[0][:150] if str(first) else ''}); logging in again and retrying")
         sess.fresh(cfg)
         results = check_dates(sess.page, cfg, state, now, dry, dates)
     save_state(state)

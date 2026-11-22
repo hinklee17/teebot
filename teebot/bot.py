@@ -60,16 +60,35 @@ def now_local(cfg: dict) -> datetime:
 
 def check_dates(page, cfg: dict, state: dict, now: datetime, dry: bool, dates) -> list[str]:
     """Search each date; book the best qualifying slot. Returns short status strings.
-    Raises on site problems (caller decides whether to re-login and retry)."""
+
+    A date whose search fails is reported and skipped, so one bad date never stops the
+    others from being checked. The furthest-out date is often not open for booking yet
+    (the club releases it at some point that day), so failures there are just "not open
+    yet". Raises only if every other date failed too (e.g. the session expired), so the
+    caller can log in again and retry."""
     SHOTS.mkdir(exist_ok=True)
     start = datetime.strptime(cfg["window_start"], "%H:%M").strftime("%-I:%M %p")
-    out = []
+    edge = max(dates) if dates else None
+    out, tried, failed = [], 0, []
     for d in dates:
         if d.isoformat() in state["booked"]:
             continue  # booked earlier in this same cycle/run
         label = d.strftime("%a %b %-d")
-        site.open_tee_sheet(page, cfg["club_url"], d, start=start, players=cfg["players"])
-        slots = site.list_slots(page, cfg["players"])
+        if d != edge:
+            tried += 1
+        try:
+            site.open_tee_sheet(page, cfg["club_url"], d, start=start, players=cfg["players"])
+            slots = site.list_slots(page, cfg["players"])
+        except Exception as e:
+            if d == edge:
+                out.append(f"{label}: not open yet")
+            else:
+                failed.append(e)
+                out.append(f"{label}: search failed ({str(e).splitlines()[0][:80]})")
+            if not _reset_to_search(page, cfg):
+                raise RuntimeError("Search page didn't come back after a failed search "
+                                   "(session expired?)") from e
+            continue
         choice = pick_slot(slots, d, now, cfg)
         if not choice:
             out.append(f"{label}: none ({len(slots)} later)")
@@ -101,7 +120,20 @@ def check_dates(page, cfg: dict, state: dict, now: datetime, dry: bool, dates) -
             f"Date: {d:%A, %B %-d, %Y}\nTime: {tt}\n\nConfirmation:\n{confirmation}\n",
         )
         out.append(f"{label}: BOOKED {tt}")
+    if failed and len(failed) == tried:
+        raise failed[0]
     return out
+
+
+def _reset_to_search(page, cfg: dict) -> bool:
+    """After a failed search, reload the search page so the next date starts clean.
+    Returns False if the search form doesn't come back (e.g. we've been logged out)."""
+    try:
+        page.goto(cfg["club_url"], wait_until="domcontentloaded")
+        page.locator("xpath=//*[normalize-space(text())='Date:']").first.wait_for(timeout=8000)
+        return True
+    except Exception:
+        return False
 
 
 def _shot(page, name: str) -> None:

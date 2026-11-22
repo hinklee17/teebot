@@ -31,9 +31,10 @@ def login(page: Page, base_url: str, username: str, password: str) -> Page:
     pw.fill(password)
     page.get_by_role("button", name=re.compile(r"log ?in", re.I)).or_(page.locator("#wp-submit")).first.click()
     page.wait_for_load_state("networkidle")
-    if page.locator("#login_error, .login-error, .wp-login-error").count() or \
-       page.get_by_text(re.compile(r"incorrect|unknown (user|email)|error:", re.I)).count():
-        raise RuntimeError("Club login rejected -- check CLUB_USERNAME / CLUB_PASSWORD")
+    if "login=failed" in page.url or page.locator("#login_error, .login-error, .wp-login-error").count() or \
+       page.get_by_text(re.compile(r"login failed|incorrect|unknown (user|email)|error:", re.I)).count():
+        raise RuntimeError("Club login rejected (wrong email or password). "
+                           "Re-enter it on the server: sudo rm /etc/teebot.env && sudo teebot-update")
     return go_to_tee_times(page, base_url)
 
 
